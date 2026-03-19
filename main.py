@@ -7,7 +7,7 @@ from openai import OpenAI
 import base64
 
 # --- 1. ページ基本設定 ---
-st.set_page_config(page_title="Professional Strategy Health Analyzer", layout="wide")
+st.set_page_config(page_title="プロフェッショナル戦略健全性診断ツール", layout="wide")
 
 # --- 2. パスワード認証機能 ---
 def check_password():
@@ -74,7 +74,7 @@ def analyze_strategy(df):
     pbo_score = np.mean([1 if s < sharpe * 0.6 else 0 for s in split_sharpes]) * 100
     mc_iterations = 10000
     mc_results = []
-    my_bar = st.progress(0, text="10,000回シミュレーション中...")
+    my_bar = st.progress(0, text="10,000回モンテカルロ検定中...")
     for i in range(mc_iterations):
         shuffled = np.random.permutation(returns)
         res = np.mean(shuffled) / np.std(shuffled) * np.sqrt(252) if np.std(shuffled) != 0 else 0
@@ -88,32 +88,52 @@ def analyze_strategy(df):
 def get_ai_advice(api_key, df, stats):
     client = OpenAI(api_key=api_key)
     sharpe, pbo, p_val = stats
+    item_stats = df['Item'].value_counts().to_dict() if 'Item' in df.columns else "データなし"
     prompt = f"""
     あなたは金融機関のクオンツアナリストです。
     トレード数: {len(df)}, シャープ: {sharpe:.2f}, PBO: {pbo:.1f}%, p値: {p_val:.4f}
-    判定が合格でない場合、エントリー条件、決済、銘柄選定の観点から『戦略改善ワークシート』として具体的な数学的・論理的アドバイスを提示してください。
+    銘柄分布: {item_stats}
+    上記に基づき、戦略の優位性を診断し、具体的な改善案を『戦略改善ワークシート』として提示してください。
     """
     response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}])
     return response.choices[0].message.content
 
-# --- 6. レポート出力機能 ---
-def generate_html_report(df, stats, advice):
+# --- 6. レポート出力機能 (グラフ埋め込み版) ---
+def generate_html_report(df, stats, advice, fig1, fig2):
     sharpe, pbo, p_val = stats
+    # PlotlyグラフをHTML文字列に変換
+    fig1_html = fig1.to_html(full_html=False, include_plotlyjs='cdn')
+    fig2_html = fig2.to_html(full_html=False, include_plotlyjs='cdn')
+    
     report_html = f"""
-    <html><body>
-    <h1>戦略診断レポート</h1>
-    <p>期待シャープレシオ: {sharpe:.2f}</p>
-    <p>PBO (過学習確率): {pbo:.1f}%</p>
-    <p>モンテカルロ p値: {p_val:.4f}</p>
-    <hr><h2>AI分析・改善提言</h2>
-    <div style="white-space: pre-wrap;">{advice}</div>
-    </body></html>
+    <html>
+    <head><meta charset="utf-8"><title>戦略診断レポート</title></head>
+    <body style="font-family: sans-serif; padding: 20px;">
+        <h1>🛡️ 戦略診断・改善レポート</h1>
+        <hr>
+        <h3>■ 統計スコア</h3>
+        <ul>
+            <li>期待シャープレシオ: {sharpe:.2f}</li>
+            <li>PBO (過学習確率): {pbo:.1f}%</li>
+            <li>モンテカルロ p値: {p_val:.4f}</li>
+        </ul>
+        <hr>
+        <h3>■ AI診断・改善ワークシート</h3>
+        <div style="background: #f4f4f4; padding: 15px; white-space: pre-wrap;">{advice}</div>
+        <hr>
+        <h3>■ 解析グラフ</h3>
+        <div>{fig1_html}</div>
+        <div style="margin-top:20px;">{fig2_html}</div>
+    </body>
+    </html>
     """
     return report_html
 
 # --- 7. メインUI ---
 if check_password():
-    st.title("🛡️ Professional Strategy Health Analyzer")
+    st.title("🛡️ プロフェッショナル戦略健全性診断ツール")
+    st.caption("Produced by Singapore Financial IT Lab")
+
     with st.sidebar:
         st.header("1. 解析設定")
         platform_choice = st.selectbox("プラットフォーム", ["MT4/MT5 (HTML Report)", "カスタム (CSV)"])
@@ -132,7 +152,6 @@ if check_password():
         if data is not None and len(data) >= 10:
             sharpe, pbo, p_val, split_sharpes, mc_results = analyze_strategy(data)
             
-            # 判定表示
             st.divider()
             if pbo < 25 and p_val < 0.05: st.success("### 判定: 🟢 合格")
             elif pbo < 50: st.warning("### 判定: 🟡 注意")
@@ -144,26 +163,28 @@ if check_password():
             m3.metric("モンテカルロ p値", f"{p_val:.4f}")
 
             # AI診断
-            advice = "診断にはAPIキーが必要です。"
+            advice = "診断レポートの生成にはAPIキーが必要です。"
             if user_api_key:
-                with st.status("AI解析中...", expanded=True) as status:
+                with st.status("AI解析 & ワークシート生成中...", expanded=True) as status:
                     advice = get_ai_advice(user_api_key, data, (sharpe, pbo, p_val))
                     st.markdown(advice)
-                    status.update(label="✅ 診断完了", state="complete", expanded=True)
+                    status.update(label="✅ 診断レポート生成完了", state="complete", expanded=True)
             else:
-                st.info("💡 簡易診断: 優位性は統計的に検証されています。" if p_val < 0.05 else "💡 簡易診断: 詳細な改善案はAPIキーを入力してください。")
+                st.info("💡 簡易判定: 統計的優位性は検証済みです。詳細アドバイスはAPIキーを入力してください。")
+
+            # グラフ生成
+            fig1 = px.histogram(split_sharpes, nbins=10, title="パフォーマンス安定性（CPCV分布）")
+            fig2 = go.Figure()
+            fig2.add_trace(go.Histogram(x=mc_results, name='ランダム', marker_color='#AAAAAA'))
+            fig2.add_vline(x=sharpe, line_dash="dash", line_color="red", annotation_text="あなたの実力")
+            fig2.update_layout(title="モンテカルロ検定（1万回）")
 
             # レポート出力
             st.divider()
-            html_report = generate_html_report(data, (sharpe, pbo, p_val), advice)
-            st.download_button("📜 戦略診断レポート(HTML)をダウンロード", data=html_report, file_name="Strategy_Report.html", mime="text/html")
+            html_report = generate_html_report(data, (sharpe, pbo, p_val), advice, fig1, fig2)
+            st.download_button("📜 戦略診断レポート(HTML)を保存", data=html_report, file_name="Strategy_Report.html", mime="text/html")
             
-            # 可視化
             t1, t2 = st.tabs(["📊 パフォーマンス分布", "🎲 モンテカルロ検証"])
-            with t1: st.plotly_chart(px.histogram(split_sharpes, title="期間別安定性"), use_container_width=True)
-            with t2:
-                fig = go.Figure()
-                fig.add_trace(go.Histogram(x=mc_results, name='ランダム成績'))
-                fig.add_vline(x=sharpe, line_dash="dash", line_color="red", annotation_text="あなたの実力")
-                st.plotly_chart(fig, use_container_width=True)
-        else: st.error("有効なトレードデータが不足しています。")
+            with t1: st.plotly_chart(fig1, use_container_width=True)
+            with t2: st.plotly_chart(fig2, use_container_width=True)
+        else: st.error("有効なトレードデータが不足しています（最低10件）。")
