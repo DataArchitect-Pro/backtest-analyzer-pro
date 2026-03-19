@@ -29,51 +29,57 @@ def check_password():
     return False
 
 # --- 3. 強化版 データ前処理ロジック ---
-def preprocess_data(file, platform):
+def preprocess_data(file, platform, custom_col=None):
     try:
-        # --- HTMLレポート処理 (MT4 / MT5 両対応) ---
+        # --- HTMLレポート処理 (ストラテジーテスター & リアルトレード両対応) ---
         if platform == "MT4/MT5 (HTML Report)":
             tables = pd.read_html(file)
-            df_trades = None
+            best_returns = None
             
-            # 全テーブルをスキャンして損益データが含まれる表を特定
-            for table in tables:
-                temp_df = table.copy()
-                temp_df.columns = temp_df.iloc[0]
-                
-                # 損益を示す可能性のある列名を検索
-                target_cols = ['Profit', 'Profit/Loss', '利益']
-                found_col = next((c for c in target_cols if c in temp_df.columns), None)
-                
-                if found_col:
-                    df_trades = temp_df.drop(temp_df.index[0])
-                    profit_col_name = found_col
-                    break
+            # 全テーブルをスキャンして、最も「トレード履歴らしい」データを持つ表を探す
+            for df in tables:
+                # 各行をスキャンしてヘッダー（Profit列）を探す
+                for i in range(min(20, len(df))): 
+                    row_values = [str(val).strip() for val in df.iloc[i]]
+                    
+                    # 損益を示す可能性のあるキーワードを探す
+                    target_keywords = ['Profit', 'Profit/Loss', '利益']
+                    found_col_idx = next((idx for idx, val in enumerate(row_values) if val in target_keywords), None)
+                    
+                    if found_col_idx is not None:
+                        temp_df = df.copy()
+                        temp_df.columns = row_values
+                        temp_df = temp_df.iloc[i+1:] # ヘッダー以降をデータとする
+                        
+                        # 損益列を数値化
+                        col_name = row_values[found_col_idx]
+                        rets = pd.to_numeric(temp_df[col_name], errors='coerce').dropna()
+                        # 決済データのみ抽出（注文や入出金の0を除外）
+                        rets = rets[rets != 0]
+                        
+                        # 最もデータ件数が多いテーブルを採用（集計表との誤認を避ける）
+                        if best_returns is None or len(rets) > len(best_returns):
+                            best_returns = rets
             
-            if df_trades is None:
-                st.error("レポート内に損益データ（Profit列）が見つかりませんでした。")
+            if best_returns is None or len(best_returns) == 0:
+                st.error("レポート内に有効な損益データが見つかりませんでした。")
                 return None
-                
-            returns = pd.to_numeric(df_trades[profit_col_name], errors='coerce').dropna()
-            # 決済以外の行（注文中など）を除外するため0以外を抽出
-            returns = returns[returns != 0]
+            return best_returns
             
-        # --- TradingView CSV 処理 ---
-        elif platform == "TradingView (CSV)":
+        # --- カスタム CSV 処理 (列選択対応) ---
+        elif platform == "カスタム (CSV)":
             df = pd.read_csv(file)
-            target_col = [c for c in df.columns if 'Profit' in c][0]
-            returns = pd.to_numeric(df[target_col], errors='coerce').dropna()
+            if custom_col and custom_col in df.columns:
+                returns = pd.to_numeric(df[custom_col], errors='coerce').dropna()
+            else:
+                # 選択されていない場合は数値列の1つ目を採用
+                returns = df.select_dtypes(include=[np.number]).iloc[:, 0].dropna()
+            return returns
             
-        # --- カスタム CSV 処理 ---
-        else:
-            df = pd.read_csv(file)
-            # 数値列の最初のものを取得
-            returns = df.select_dtypes(include=[np.number]).iloc[:, 0].dropna()
-            
-        return returns
+        return None
         
     except Exception as e:
-        st.error(f"データの読み込みに失敗しました: {e}")
+        st.error(f"データの解析中にエラーが発生しました: {e}")
         return None
 
 # --- 4. 統計解析エンジン (10,000回モンテカルロ) ---
@@ -82,15 +88,12 @@ def analyze_strategy(returns_vec):
     if len(returns) < 10:
         return None
     
-    # 期待シャープレシオ (年率換算)
     sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) != 0 else 0
     
-    # CPCV (過学習検証)
     splits = np.array_split(returns, 5)
     split_sharpes = [np.mean(s) / np.std(s) * np.sqrt(252) for s in splits if len(s) > 5 and np.std(s) > 0]
     pbo_score = np.mean([1 if s < sharpe * 0.6 else 0 for s in split_sharpes]) * 100
     
-    # モンテカルロ検定 (10,000回シミュレーション)
     mc_iterations = 10000
     mc_results = []
     
@@ -118,9 +121,9 @@ def get_ai_advice(api_key, platform, num_trades, sharpe, pbo, p_val):
         client = OpenAI(api_key=api_key)
         verdict = "合格" if (pbo < 25 and p_val < 0.05) else "注意" if pbo < 50 else "棄却"
         prompt = f"""
-        あなたはヘッジファンドのシニアアナリストです。
+        あなたはヘッジファンドのシニアアナリストです。以下の統計データに基づき、この戦略を診断してください。
         プラットフォーム: {platform}, トレード数: {num_trades}, シャープ: {sharpe:.2f}, PBO: {pbo:.1f}%, p値: {p_val:.4f}, 判定: {verdict}
-        分析、リスク、提言の3部構成で、プロフェッショナルな日本語で回答してください。
+        分析、リスク、アクションプランの3部構成で、プロフェッショナルな日本語で回答してください。
         """
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -136,20 +139,37 @@ if check_password():
     st.title("🛡️ プロフェッショナル・戦略健全性診断ツール")
     st.caption("Produced by Singapore Financial IT Lab")
 
+    custom_profit_col = None
+
     with st.sidebar:
         st.header("1. 解析設定")
         platform_choice = st.selectbox(
             "プラットフォームを選択", 
-            ["MT4/MT5 (HTML Report)", "TradingView (CSV)", "カスタム (CSV)"]
+            ["MT4/MT5 (HTML Report)", "カスタム (CSV)"]
         )
         uploaded_file = st.file_uploader("ファイルをアップロード", type=['csv', 'html', 'htm'])
+        
+        # カスタムCSVの場合の列選択機能
+        if uploaded_file and platform_choice == "カスタム (CSV)":
+            try:
+                # プレビュー読み込み
+                df_preview = pd.read_csv(uploaded_file)
+                uploaded_file.seek(0) # ポインタを戻す
+                custom_profit_col = st.selectbox(
+                    "損益(Profit)データが含まれる列を選択してください",
+                    df_preview.columns,
+                    help="各トレードの損益（金額）が入っている列を選んでください。"
+                )
+            except Exception as e:
+                st.error("CSVの読み込みに失敗しました。")
+
         st.divider()
         st.header("2. AI診断オプション")
         user_api_key = st.text_input("OpenAI API Keyを入力してください", type="password")
         st.caption("※APIキーなしでも統計解析は可能です。")
 
     if uploaded_file:
-        returns_data = preprocess_data(uploaded_file, platform_choice)
+        returns_data = preprocess_data(uploaded_file, platform_choice, custom_profit_col)
         
         if returns_data is not None and len(returns_data) >= 10:
             res = analyze_strategy(returns_data)
@@ -176,7 +196,7 @@ if check_password():
                         advice = get_ai_advice(user_api_key, platform_choice, len(returns_data), sharpe, pbo, p_val)
                         if advice:
                             st.markdown(advice)
-                        status.update(label="✅ AI診断が完了しました", state="complete", expanded=True)
+                        status.update(label="✅ AIプロフェッショナル診断が完了しました", state="complete", expanded=True)
                 else:
                     st.info("💡 サイドバーにOpenAI APIキーを入力すると、詳細なAI診断レポートが表示されます。")
 
@@ -186,11 +206,12 @@ if check_password():
                     st.plotly_chart(px.histogram(split_sharpes, nbins=10, title="分割データ別のシャープレシオ分布"), use_container_width=True)
                 with tab2:
                     fig2 = go.Figure()
-                    fig2.add_trace(go.Histogram(x=mc_results, name='ランダム成績分布', marker_color='#AAAAAA'))
+                    fig2.add_trace(go.Histogram(x=mc_results, name='ランダムな成績分布', marker_color='#AAAAAA'))
                     fig2.add_vline(x=sharpe, line_dash="dash", line_color="red", annotation_text="あなたの実力")
                     fig2.update_layout(title="モンテカルロ検定：10,000回検証結果", barmode='overlay')
                     st.plotly_chart(fig2, use_container_width=True)
         else:
-            st.error("有効なトレードデータが不足しています。")
+            if returns_data is not None:
+                st.error(f"データ件数が不足しています（検出数: {len(returns_data)}件）。解析には最低10件必要です。")
     else:
-        st.info("サイドバーからファイルをアップロードしてください。")
+        st.info("サイドバーからバックテストまたはリアルトレードのレポートをアップロードしてください。")
