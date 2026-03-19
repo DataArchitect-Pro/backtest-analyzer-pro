@@ -39,15 +39,13 @@ def preprocess_data(file, platform):
             # 全テーブルをスキャンして損益データが含まれる表を特定
             for table in tables:
                 temp_df = table.copy()
-                # 1行目をヘッダーとして仮設定して列名をチェック
                 temp_df.columns = temp_df.iloc[0]
                 
-                # MT4/MT5で共通して使われる列名を検索
+                # 損益を示す可能性のある列名を検索
                 target_cols = ['Profit', 'Profit/Loss', '利益']
                 found_col = next((c for c in target_cols if c in temp_df.columns), None)
                 
                 if found_col:
-                    # 'Balance'や'Time'列もあればトレード履歴である可能性が高い
                     df_trades = temp_df.drop(temp_df.index[0])
                     profit_col_name = found_col
                     break
@@ -66,14 +64,10 @@ def preprocess_data(file, platform):
             target_col = [c for c in df.columns if 'Profit' in c][0]
             returns = pd.to_numeric(df[target_col], errors='coerce').dropna()
             
-        # --- MT5 CSV 処理 ---
-        elif platform == "MT5 (CSV)":
-            df = pd.read_csv(file, sep='\t', encoding='utf-16')
-            returns = pd.to_numeric(df['Profit'], errors='coerce').dropna()
-            
         # --- カスタム CSV 処理 ---
         else:
             df = pd.read_csv(file)
+            # 数値列の最初のものを取得
             returns = df.select_dtypes(include=[np.number]).iloc[:, 0].dropna()
             
         return returns
@@ -88,15 +82,15 @@ def analyze_strategy(returns_vec):
     if len(returns) < 10:
         return None
     
-    # 基本統計（年率換算シャープレシオ）
+    # 期待シャープレシオ (年率換算)
     sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) != 0 else 0
     
-    # CPCV (5分割データによる過学習検証)
+    # CPCV (過学習検証)
     splits = np.array_split(returns, 5)
     split_sharpes = [np.mean(s) / np.std(s) * np.sqrt(252) for s in splits if len(s) > 5 and np.std(s) > 0]
     pbo_score = np.mean([1 if s < sharpe * 0.6 else 0 for s in split_sharpes]) * 100
     
-    # モンテカルロ検定 (10,000回シミュレーション & 進捗表示)
+    # モンテカルロ検定 (10,000回シミュレーション)
     mc_iterations = 10000
     mc_results = []
     
@@ -109,7 +103,7 @@ def analyze_strategy(returns_vec):
         res = np.mean(shuffled) / std_val * np.sqrt(252) if std_val != 0 else 0
         mc_results.append(res)
         
-        if i % 250 == 0: # 更新頻度を調整してパフォーマンス維持
+        if i % 250 == 0:
             my_bar.progress(i / mc_iterations, text=f"{progress_text} : {i}/{mc_iterations} 完了")
             
     my_bar.empty()
@@ -117,16 +111,16 @@ def analyze_strategy(returns_vec):
     
     return sharpe, pbo_score, p_value, split_sharpes, mc_results
 
-# --- 5. AI診断機能 (自動展開設定) ---
+# --- 5. AIコンサルタント機能 ---
 def get_ai_advice(api_key, platform, num_trades, sharpe, pbo, p_val):
     if not api_key: return None
     try:
         client = OpenAI(api_key=api_key)
         verdict = "合格" if (pbo < 25 and p_val < 0.05) else "注意" if pbo < 50 else "棄却"
         prompt = f"""
-        あなたはヘッジファンドのシニアアナリストです。以下の統計データに基づき、この戦略を診断してください。
+        あなたはヘッジファンドのシニアアナリストです。
         プラットフォーム: {platform}, トレード数: {num_trades}, シャープ: {sharpe:.2f}, PBO: {pbo:.1f}%, p値: {p_val:.4f}, 判定: {verdict}
-        分析、リスク、アクションプランの3構成でプロフェッショナルな日本語で回答してください。
+        分析、リスク、提言の3部構成で、プロフェッショナルな日本語で回答してください。
         """
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -146,25 +140,23 @@ if check_password():
         st.header("1. 解析設定")
         platform_choice = st.selectbox(
             "プラットフォームを選択", 
-            ["MT4/MT5 (HTML Report)", "TradingView (CSV)", "MT5 (CSV)", "カスタム (CSV)"]
+            ["MT4/MT5 (HTML Report)", "TradingView (CSV)", "カスタム (CSV)"]
         )
         uploaded_file = st.file_uploader("ファイルをアップロード", type=['csv', 'html', 'htm'])
         st.divider()
         st.header("2. AI診断オプション")
-        user_api_key = st.text_input("OpenAI API Keyを入力してください", type="password", help="診断時のみ使用され、保存されません。")
+        user_api_key = st.text_input("OpenAI API Keyを入力してください", type="password")
         st.caption("※APIキーなしでも統計解析は可能です。")
 
     if uploaded_file:
         returns_data = preprocess_data(uploaded_file, platform_choice)
         
         if returns_data is not None and len(returns_data) >= 10:
-            # 解析実行
             res = analyze_strategy(returns_data)
             
             if res:
                 sharpe, pbo, p_val, split_sharpes, mc_results = res
                 
-                # --- セクション1: 判定表示 ---
                 st.divider()
                 if pbo < 25 and p_val < 0.05:
                     st.success("### 判定: 🟢 合格（統計的優位性が認められます）")
@@ -178,29 +170,27 @@ if check_password():
                 col2.metric("PBO (過学習確率)", f"{pbo:.1f}%")
                 col3.metric("モンテカルロ p値", f"{p_val:.4f}")
 
-                # --- セクション2: AI診断 (自動展開) ---
+                # AI診断 (自動展開)
                 if user_api_key:
                     with st.status("AIコンサルタントが戦略を精査中...", expanded=True) as status:
                         advice = get_ai_advice(user_api_key, platform_choice, len(returns_data), sharpe, pbo, p_val)
                         if advice:
                             st.markdown(advice)
-                        status.update(label="✅ AIプロフェッショナル診断が完了しました", state="complete", expanded=True)
+                        status.update(label="✅ AI診断が完了しました", state="complete", expanded=True)
                 else:
                     st.info("💡 サイドバーにOpenAI APIキーを入力すると、詳細なAI診断レポートが表示されます。")
 
-                # --- セクション3: グラフ表示 ---
                 st.divider()
-                tab1, tab2 = st.tabs(["📊 パフォーマンス分布 (CPCV)", "🎲 偶然性検証 (Monte Carlo)"])
+                tab1, tab2 = st.tabs(["📊 パフォーマンス分布", "🎲 モンテカルロ検証"])
                 with tab1:
-                    fig1 = px.histogram(split_sharpes, nbins=10, title="分割データ別のシャープレシオ分布")
-                    st.plotly_chart(fig1, use_container_width=True)
+                    st.plotly_chart(px.histogram(split_sharpes, nbins=10, title="分割データ別のシャープレシオ分布"), use_container_width=True)
                 with tab2:
                     fig2 = go.Figure()
-                    fig2.add_trace(go.Histogram(x=mc_results, name='ランダムな成績分布', marker_color='#AAAAAA'))
+                    fig2.add_trace(go.Histogram(x=mc_results, name='ランダム成績分布', marker_color='#AAAAAA'))
                     fig2.add_vline(x=sharpe, line_dash="dash", line_color="red", annotation_text="あなたの実力")
                     fig2.update_layout(title="モンテカルロ検定：10,000回検証結果", barmode='overlay')
                     st.plotly_chart(fig2, use_container_width=True)
         else:
-            st.error("有効なトレードデータが不足しています（最低10件以上）。")
+            st.error("有効なトレードデータが不足しています。")
     else:
-        st.info("サイドバーからバックテストファイルをアップロードして解析を開始してください。")
+        st.info("サイドバーからファイルをアップロードしてください。")
