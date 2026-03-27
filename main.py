@@ -5,26 +5,94 @@ import plotly.express as px
 import plotly.graph_objects as go
 from openai import OpenAI
 import base64
+import time
+import uuid
 
 # --- 1. ページ基本設定 ---
 st.set_page_config(page_title="プロフェッショナル戦略健全性診断ツール", layout="wide")
 
-# --- 2. パスワード認証機能 ---
+# ==========================================
+# 2. 認証ロジック (先勝ちブロック + タイムアウト機能)
+# ==========================================
+# 💡 アプリ全体で共有される「ログイン中のセッション状態」
+@st.cache_resource
+def get_active_sessions():
+    # 構造: { "user_id": {"token": "...", "last_active": 1690000000.0} }
+    return {}
+
 def check_password():
-    if "password_correct" not in st.session_state:
-        st.session_state["password_correct"] = False
-    if st.session_state["password_correct"]: return True
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.title("🔐 購入者専用ログイン")
-        password = st.text_input("パスワードを入力してください", type="password")
-        if st.button("ログイン"):
-            if "ACCESS_PASSWORD" in st.secrets and password == st.secrets["ACCESS_PASSWORD"]:
-                st.session_state["password_correct"] = True
-                st.rerun()
-            else:
-                st.error("パスワードが正しくありません")
-    return False
+    common_password = st.secrets.get("APP_PASSWORD", "vUtZ7&Lyk!XuMS4r)G")
+    allowed_ids = st.secrets.get("ALLOWED_IDS", ["a380.rolls.royce@gmail.com"])
+    
+    active_sessions = get_active_sessions()
+    current_time = time.time()
+    
+    # 💡 安全装置：30分（1800秒）操作がなかったセッションは「ログアウト忘れ（ブラウザ閉じ）」とみなし、ロックを解除する
+    TIMEOUT_SECONDS = 1800 
+    for uid in list(active_sessions.keys()):
+        if current_time - active_sessions[uid]["last_active"] > TIMEOUT_SECONDS:
+            del active_sessions[uid]
+
+    # セッションステートの初期化
+    if "user_id" not in st.session_state:
+        st.session_state["user_id"] = None
+    if "session_token" not in st.session_state:
+        st.session_state["session_token"] = None
+
+    current_user = st.session_state["user_id"]
+    current_token = st.session_state["session_token"]
+
+    # 💡 現在ログイン中のユーザーが操作した際の生存確認（タイムアウトの更新）
+    if current_user:
+        if current_user in active_sessions and active_sessions[current_user]["token"] == current_token:
+            # 操作するたびに寿命をリセット（延長）する
+            active_sessions[current_user]["last_active"] = current_time
+        else:
+            # タイムアウト等でサーバーから消去された場合はログアウト状態に戻す
+            st.session_state["user_id"] = None
+            st.session_state["session_token"] = None
+            current_user = None
+
+    # ログインしていない場合の画面表示
+    if not current_user:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown("<h1 style='text-align: center; color: #333; font-size: 2.5em;'>🔒 ユーザーログイン</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #666; font-size: 1.3em; margin-bottom: 10px;'>付与された専用IDと、共通パスワードを入力してください。</p>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #d32f2f; font-size: 0.9em; margin-bottom: 30px;'>※同時ログイン不可（別の人が使用中のIDではログインできません）</p>", unsafe_allow_html=True)
+        
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            with st.form("login_form"):
+                st.markdown("<div style='font-size: 1.0em; font-weight: bold; margin-bottom: 4px; color: #333;'>📝 専用ユーザーID</div>", unsafe_allow_html=True)
+                user_id = st.text_input("ID", placeholder="例：noteの注文IDなど", label_visibility="collapsed")
+                
+                st.markdown("<div style='font-size: 1.0em; font-weight: bold; margin-top: 12px; margin-bottom: 4px; color: #333;'>🔑 共通パスワード</div>", unsafe_allow_html=True)
+                password = st.text_input("パスワード", type="password", placeholder="記事内にあるパスワードを入力", label_visibility="collapsed")
+                
+                st.markdown("<br>", unsafe_allow_html=True)
+                submit = st.form_submit_button("ログイン", use_container_width=True)
+
+                if submit:
+                    if password != common_password:
+                        st.error("❌ パスワードが間違っています。")
+                    elif user_id not in allowed_ids:
+                        st.error("❌ 登録されていないユーザーIDです。")
+                    elif user_id in active_sessions:
+                        # 💡 ここで「後からのログイン」を完全にブロックする
+                        st.error("❌ このIDは現在別の端末・ブラウザで利用中です。（同時ログイン不可）\n\n※前の利用者がログアウトするか、一定時間（最大30分）経過するまでお待ちください。")
+                    else:
+                        # 認証成功：新しいユニークトークンを発行し、時間を記録
+                        new_token = str(uuid.uuid4())
+                        st.session_state["user_id"] = user_id
+                        st.session_state["session_token"] = new_token
+                        active_sessions[user_id] = {"token": new_token, "last_active": current_time}
+                        st.rerun() 
+        
+        # 認証されるまで以降のコードを一切実行しない
+        st.stop()
+
+# アプリ起動時に必ずパスワードとセッションをチェック
+check_password()
 
 # --- 3. データ前処理 (Open/Close Time, Item対応) ---
 def preprocess_data(file, platform, custom_col=None):
@@ -101,7 +169,6 @@ def get_ai_advice(api_key, df, stats):
 # --- 6. レポート出力機能 (グラフ埋め込み版) ---
 def generate_html_report(df, stats, advice, fig1, fig2):
     sharpe, pbo, p_val = stats
-    # PlotlyグラフをHTML文字列に変換
     fig1_html = fig1.to_html(full_html=False, include_plotlyjs='cdn')
     fig2_html = fig2.to_html(full_html=False, include_plotlyjs='cdn')
     
@@ -130,61 +197,71 @@ def generate_html_report(df, stats, advice, fig1, fig2):
     return report_html
 
 # --- 7. メインUI ---
-if check_password():
-    st.title("🛡️ プロフェッショナル戦略健全性診断ツール")
-    st.caption("Produced by Singapore Financial IT Lab")
+st.title("🛡️ プロフェッショナル戦略健全性診断ツール")
+st.caption("Produced by Singapore Financial IT Lab")
 
-    with st.sidebar:
-        st.header("1. 解析設定")
-        platform_choice = st.selectbox("プラットフォーム", ["MT4/MT5 (HTML Report)", "カスタム (CSV)"])
-        uploaded_file = st.file_uploader("レポートファイルをアップロード", type=['csv', 'html', 'htm'])
-        custom_profit_col = None
-        if uploaded_file and platform_choice == "カスタム (CSV)":
-            df_p = pd.read_csv(uploaded_file)
-            custom_profit_col = st.selectbox("損益(Profit)列を選択", df_p.columns)
-            uploaded_file.seek(0)
+with st.sidebar:
+    # 💡 追加: ログアウト機能
+    st.markdown(f"**👤 ログイン中: {st.session_state['user_id']}**")
+    if st.button("ログアウト", use_container_width=True):
+        active_sessions = get_active_sessions()
+        if st.session_state["user_id"] in active_sessions:
+            del active_sessions[st.session_state["user_id"]]
+        st.session_state["user_id"] = None
+        st.session_state["session_token"] = None
+        st.rerun()
+    st.divider()
+
+    st.header("1. 解析設定")
+    platform_choice = st.selectbox("プラットフォーム", ["MT4/MT5 (HTML Report)", "カスタム (CSV)"])
+    uploaded_file = st.file_uploader("レポートファイルをアップロード", type=['csv', 'html', 'htm'])
+    custom_profit_col = None
+    if uploaded_file and platform_choice == "カスタム (CSV)":
+        df_p = pd.read_csv(uploaded_file)
+        custom_profit_col = st.selectbox("損益(Profit)列を選択", df_p.columns)
+        uploaded_file.seek(0)
+    st.divider()
+    st.header("2. AI診断設定")
+    user_api_key = st.text_input("OpenAI API Key (任意)", type="password")
+
+if uploaded_file:
+    data = preprocess_data(uploaded_file, platform_choice, custom_profit_col)
+    if data is not None and len(data) >= 10:
+        sharpe, pbo, p_val, split_sharpes, mc_results = analyze_strategy(data)
+        
         st.divider()
-        st.header("2. AI診断設定")
-        user_api_key = st.text_input("OpenAI API Key (任意)", type="password")
+        if pbo < 25 and p_val < 0.05: st.success("### 判定: 🟢 合格")
+        elif pbo < 50: st.warning("### 判定: 🟡 注意")
+        else: st.error("### 判定: 🔴 棄却")
 
-    if uploaded_file:
-        data = preprocess_data(uploaded_file, platform_choice, custom_profit_col)
-        if data is not None and len(data) >= 10:
-            sharpe, pbo, p_val, split_sharpes, mc_results = analyze_strategy(data)
-            
-            st.divider()
-            if pbo < 25 and p_val < 0.05: st.success("### 判定: 🟢 合格")
-            elif pbo < 50: st.warning("### 判定: 🟡 注意")
-            else: st.error("### 判定: 🔴 棄却")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("期待シャープレシオ", f"{sharpe:.2f}")
+        m2.metric("PBO (過学習確率)", f"{pbo:.1f}%")
+        m3.metric("モンテカルロ p値", f"{p_val:.4f}")
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("期待シャープレシオ", f"{sharpe:.2f}")
-            m2.metric("PBO (過学習確率)", f"{pbo:.1f}%")
-            m3.metric("モンテカルロ p値", f"{p_val:.4f}")
+        # AI診断
+        advice = "診断レポートの生成にはAPIキーが必要です。"
+        if user_api_key:
+            with st.status("AI解析 & ワークシート生成中...", expanded=True) as status:
+                advice = get_ai_advice(user_api_key, data, (sharpe, pbo, p_val))
+                st.markdown(advice)
+                status.update(label="✅ 診断レポート生成完了", state="complete", expanded=True)
+        else:
+            st.info("💡 簡易判定: 統計的優位性は検証済みです。詳細アドバイスはAPIキーを入力してください。")
 
-            # AI診断
-            advice = "診断レポートの生成にはAPIキーが必要です。"
-            if user_api_key:
-                with st.status("AI解析 & ワークシート生成中...", expanded=True) as status:
-                    advice = get_ai_advice(user_api_key, data, (sharpe, pbo, p_val))
-                    st.markdown(advice)
-                    status.update(label="✅ 診断レポート生成完了", state="complete", expanded=True)
-            else:
-                st.info("💡 簡易判定: 統計的優位性は検証済みです。詳細アドバイスはAPIキーを入力してください。")
+        # グラフ生成
+        fig1 = px.histogram(split_sharpes, nbins=10, title="パフォーマンス安定性（CPCV分布）")
+        fig2 = go.Figure()
+        fig2.add_trace(go.Histogram(x=mc_results, name='ランダム', marker_color='#AAAAAA'))
+        fig2.add_vline(x=sharpe, line_dash="dash", line_color="red", annotation_text="あなたの実力")
+        fig2.update_layout(title="モンテカルロ検定（1万回）")
 
-            # グラフ生成
-            fig1 = px.histogram(split_sharpes, nbins=10, title="パフォーマンス安定性（CPCV分布）")
-            fig2 = go.Figure()
-            fig2.add_trace(go.Histogram(x=mc_results, name='ランダム', marker_color='#AAAAAA'))
-            fig2.add_vline(x=sharpe, line_dash="dash", line_color="red", annotation_text="あなたの実力")
-            fig2.update_layout(title="モンテカルロ検定（1万回）")
-
-            # レポート出力
-            st.divider()
-            html_report = generate_html_report(data, (sharpe, pbo, p_val), advice, fig1, fig2)
-            st.download_button("📜 戦略診断レポート(HTML)を保存", data=html_report, file_name="Strategy_Report.html", mime="text/html")
-            
-            t1, t2 = st.tabs(["📊 パフォーマンス分布", "🎲 モンテカルロ検証"])
-            with t1: st.plotly_chart(fig1, use_container_width=True)
-            with t2: st.plotly_chart(fig2, use_container_width=True)
-        else: st.error("有効なトレードデータが不足しています（最低10件）。")
+        # レポート出力
+        st.divider()
+        html_report = generate_html_report(data, (sharpe, pbo, p_val), advice, fig1, fig2)
+        st.download_button("📜 戦略診断レポート(HTML)を保存", data=html_report, file_name="Strategy_Report.html", mime="text/html")
+        
+        t1, t2 = st.tabs(["📊 パフォーマンス分布", "🎲 モンテカルロ検証"])
+        with t1: st.plotly_chart(fig1, use_container_width=True)
+        with t2: st.plotly_chart(fig2, use_container_width=True)
+    else: st.error("有効なトレードデータが不足しています（最低10件）。")
