@@ -64,7 +64,7 @@ def check_password():
         with col2:
             with st.form("login_form"):
                 st.markdown("<div style='font-size: 1.0em; font-weight: bold; margin-bottom: 4px; color: #333;'>📝 専用ユーザーID</div>", unsafe_allow_html=True)
-                user_id = st.text_input("ID", placeholder="例：noteの注文IDなど", label_visibility="collapsed")
+                user_id = st.text_input("ID", placeholder="あなたのnoteID", label_visibility="collapsed")
                 
                 st.markdown("<div style='font-size: 1.0em; font-weight: bold; margin-top: 12px; margin-bottom: 4px; color: #333;'>🔑 共通パスワード</div>", unsafe_allow_html=True)
                 password = st.text_input("パスワード", type="password", placeholder="記事内にあるパスワードを入力", label_visibility="collapsed")
