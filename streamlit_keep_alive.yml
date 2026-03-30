@@ -1,0 +1,16 @@
+name: Streamlit Keep Alive
+
+on:
+  schedule:
+    - cron: '0 */4 * * *' # 4時間ごとに実行（UTC 0, 4, 8, 12, 16, 20時）
+  workflow_dispatch:      # 手動でテスト実行できるようにする設定
+
+jobs:
+  ping_apps:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Ping to Streamlit Apps
+        run: |
+          curl -I https://v6wu9cbfdrhfvtpm3kd7ac.streamlit.app/
+          curl -I https://mainpy-gswk7qchfnqq2djpgbenut.streamlit.app/
+          curl -I https://nvzx2zetvrdgek9dhony4b.streamlit.app/
