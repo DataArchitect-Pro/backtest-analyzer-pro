@@ -1,16 +1,19 @@
-name: Streamlit Keep Alive
+name: Streamlit Keep Alive (High Intensity)
 
 on:
   schedule:
-    - cron: '0 */4 * * *' # 4時間ごとに実行（UTC 0, 4, 8, 12, 16, 20時）
-  workflow_dispatch:      # 手動でテスト実行できるようにする設定
+    - cron: '0 */2 * * *' # 念のため2時間おきに頻度を上げます
+  workflow_dispatch:
 
 jobs:
   ping_apps:
     runs-on: ubuntu-latest
     steps:
-      - name: Send Ping to Streamlit Apps
+      - name: Send Deep Ping to Streamlit Apps
         run: |
-          curl -I https://v6wu9cbfdrhfvtpm3kd7ac.streamlit.app/
-          curl -I https://mainpy-gswk7qchfnqq2djpgbenut.streamlit.app/
-          curl -I https://nvzx2zetvrdgek9dhony4b.streamlit.app/
+          # Chromeブラウザを装い、リダイレクトを追跡してフルアクセス
+          USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          
+          curl -L -A "$USER_AGENT" https://v6wu9cbfdrhfvtpm3kd7ac.streamlit.app/
+          curl -L -A "$USER_AGENT" https://mainpy-gswk7qchfnqq2djpgbenut.streamlit.app/
+          curl -L -A "$USER_AGENT" https://nvzx2zetvrdgek9dhony4b.streamlit.app/
