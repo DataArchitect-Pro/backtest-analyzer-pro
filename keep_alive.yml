@@ -1,0 +1,31 @@
+name: Streamlit Permanent Keep Alive
+
+on:
+  schedule:
+    # 3時間おきに実行 (0時, 3時, 6時, 9時, 12時, 15時, 18時, 21時 / UTC)
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+jobs:
+  auto_commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Update heartbeat file
+        run: |
+          # heartbeat.txt というファイルに現在時刻を書き込む（なければ作成される）
+          date > heartbeat.txt
+          echo "This file is updated automatically to prevent Streamlit from sleeping." >> heartbeat.txt
+
+      - name: Commit and Push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add heartbeat.txt
+          # 差分がない場合にエラーにならないよう || exit 0 を追加
+          git commit -m "Keep alive: $(date)" || exit 0
+          git push
