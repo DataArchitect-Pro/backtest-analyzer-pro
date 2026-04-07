@@ -94,13 +94,11 @@ def check_password():
 # アプリ起動時に必ずパスワードとセッションをチェック
 check_password()
 
-# --- 3. データ前処理 (Open/Close Time, Item対応, ノーブレークスペース完全対応版) ---
+# --- 3. データ前処理 (Open/Close Time, Item対応, MT5 Dealsテーブル完全対応版) ---
 def preprocess_data(file, platform, custom_col=None):
     try:
         if platform == "MT4/MT5 (HTML Report)":
-            # ファイルの先頭に戻しておく（念のため）
             if hasattr(file, 'seek'): file.seek(0)
-            
             tables = pd.read_html(file)
             df_final = pd.DataFrame()
             
@@ -108,46 +106,51 @@ def preprocess_data(file, platform, custom_col=None):
                 if len(df) < 2: continue
                 
                 header_idx = -1
-                # ヘッダー行を探す (Profit, Timeが含まれる行)
-                for i in range(min(30, len(df))):
-                    # 全セルを文字列化して小文字に変換
-                    row_vals = [str(v).strip().lower() for v in df.iloc[i]]
-                    if ('profit' in row_vals or '利益' in row_vals) and \
-                       ('time' in row_vals or 'open time' in row_vals or '時間' in row_vals):
-                        header_idx = i
-                        break
+                # 💡修正点: 最初の30行という制限を撤廃。
+                # Ordersテーブルの何千行も下にあるDealsテーブルのヘッダーを確実に見つけ出す
+                for i in range(len(df)):
+                    # 高速化のため、まずは行全体を文字列化してキーワードを含むかざっくりチェック
+                    row_str = " ".join(str(v).lower() for v in df.iloc[i])
+                    if ('profit' in row_str or '利益' in row_str or '損益' in row_str) and \
+                       ('time' in row_str or '時間' in row_str):
+                        
+                        # 詳細チェック：セル単位での完全一致を確認
+                        row_vals = [str(v).strip().lower() for v in df.iloc[i]]
+                        if any(k in row_vals for k in ['profit', 'profit/loss', '利益', '損益']) and \
+                           any(k in row_vals for k in ['time', 'open time', '時間']):
+                            header_idx = i
+                            break
                         
                 if header_idx != -1:
                     headers = [str(v).strip().lower() for v in df.iloc[header_idx]]
                     
-                    # 各列のインデックスを取得
-                    p_idx = next((j for j, v in enumerate(headers) if v in ['profit', 'profit/loss', '利益']), None)
+                    p_idx = next((j for j, v in enumerate(headers) if v in ['profit', 'profit/loss', '利益', '損益']), None)
                     t_idx = next((j for j, v in enumerate(headers) if 'time' in v or '時間' in v), None)
                     i_idx = next((j for j, v in enumerate(headers) if v in ['item', 'symbol', '銘柄']), None)
-                    d_idx = next((j for j, v in enumerate(headers) if v in ['direction', 'entry', '方向']), None)
+                    # MT5特有の「Direction（方向）」列を探す
+                    d_idx = next((j for j, v in enumerate(headers) if v in ['direction', 'entry', '方向', 'in/out']), None)
                     
                     if p_idx is not None:
                         temp_df = df.iloc[header_idx+1:].copy().reset_index(drop=True)
                         processed = pd.DataFrame()
                         
-                        # 💡最大の改善点: 正規表現 (r'\s+') でノーブレークスペース(\xa0)も含むすべての空白を除去
+                        # \s+ でノーブレークスペース等すべての特殊な空白を除去して数値化
                         prof_series = temp_df.iloc[:, p_idx].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '', regex=False)
                         processed['Profit'] = pd.to_numeric(prof_series, errors='coerce')
                         
                         if t_idx is not None: processed['Open Time'] = temp_df.iloc[:, t_idx]
                         if i_idx is not None: processed['Item'] = temp_df.iloc[:, i_idx]
                         
-                        # MT5のDealsテーブルの場合、Direction(方向)列で決済のみに絞り込む
+                        # MT5の場合、Directionが「out」または「in/out」（決済）のもののみを抽出
                         if d_idx is not None:
                             dirs = temp_df.iloc[:, d_idx].astype(str).str.strip().str.lower()
                             mask = dirs.isin(['out', 'in/out'])
                             processed = processed[mask]
                             
-                        # 無効な行(NaN)や損益0の行(エントリー行のダミー利益など)を除外
+                        # 無効なデータや、利益0（エントリー時の記録など）を除外
                         processed = processed.dropna(subset=['Profit'])
                         processed = processed[processed['Profit'] != 0]
                         
-                        # 一番データ件数が多いテーブル（通常はDealsテーブル）を最終データとして採用
                         if len(processed) > len(df_final):
                             df_final = processed
 
@@ -157,7 +160,6 @@ def preprocess_data(file, platform, custom_col=None):
             if hasattr(file, 'seek'): file.seek(0)
             df = pd.read_csv(file)
             if custom_col:
-                # CSVでも同様に空白を一掃してから数値化
                 prof_series = df[custom_col].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '', regex=False)
                 df['Profit'] = pd.to_numeric(prof_series, errors='coerce')
                 return df.dropna(subset=['Profit'])
