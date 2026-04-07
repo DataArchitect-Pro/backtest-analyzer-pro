@@ -270,7 +270,7 @@ if uploaded_file:
         else: st.error("### 判定: 🔴 棄却")
 
         m1, m2, m3 = st.columns(3)
-        m1.metric("期待シャープレシオ", f"{sharpe:.2f}")
+        m1.metric("システム品質スコア", f"{sharpe:.2f}")
         m2.metric("PBO (過学習確率)", f"{pbo:.1f}%")
         m3.metric("モンテカルロ p値", f"{p_val:.4f}")
 
