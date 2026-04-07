@@ -94,7 +94,7 @@ def check_password():
 # アプリ起動時に必ずパスワードとセッションをチェック
 check_password()
 
-# --- 3. データ前処理 (Open/Close Time, Item対応, MT5 Dealsテーブル完全対応版) ---
+# --- 3. データ前処理 (スワップ・手数料・ブレイクイーブン完全対応版) ---
 def preprocess_data(file, platform, custom_col=None):
     try:
         if platform == "MT4/MT5 (HTML Report)":
@@ -104,17 +104,11 @@ def preprocess_data(file, platform, custom_col=None):
             
             for df in tables:
                 if len(df) < 2: continue
-                
                 header_idx = -1
-                # 💡修正点: 最初の30行という制限を撤廃。
-                # Ordersテーブルの何千行も下にあるDealsテーブルのヘッダーを確実に見つけ出す
                 for i in range(len(df)):
-                    # 高速化のため、まずは行全体を文字列化してキーワードを含むかざっくりチェック
                     row_str = " ".join(str(v).lower() for v in df.iloc[i])
                     if ('profit' in row_str or '利益' in row_str or '損益' in row_str) and \
                        ('time' in row_str or '時間' in row_str):
-                        
-                        # 詳細チェック：セル単位での完全一致を確認
                         row_vals = [str(v).strip().lower() for v in df.iloc[i]]
                         if any(k in row_vals for k in ['profit', 'profit/loss', '利益', '損益']) and \
                            any(k in row_vals for k in ['time', 'open time', '時間']):
@@ -127,30 +121,40 @@ def preprocess_data(file, platform, custom_col=None):
                     p_idx = next((j for j, v in enumerate(headers) if v in ['profit', 'profit/loss', '利益', '損益']), None)
                     t_idx = next((j for j, v in enumerate(headers) if 'time' in v or '時間' in v), None)
                     i_idx = next((j for j, v in enumerate(headers) if v in ['item', 'symbol', '銘柄']), None)
-                    # MT5特有の「Direction（方向）」列を探す
                     d_idx = next((j for j, v in enumerate(headers) if v in ['direction', 'entry', '方向', 'in/out']), None)
+                    
+                    # 💡 手数料とスワップの列を探す
+                    c_idx = next((j for j, v in enumerate(headers) if v in ['commission', '手数料']), None)
+                    s_idx = next((j for j, v in enumerate(headers) if v in ['swap', 'スワップ']), None)
                     
                     if p_idx is not None:
                         temp_df = df.iloc[header_idx+1:].copy().reset_index(drop=True)
                         processed = pd.DataFrame()
                         
-                        # \s+ でノーブレークスペース等すべての特殊な空白を除去して数値化
                         prof_series = temp_df.iloc[:, p_idx].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '', regex=False)
-                        processed['Profit'] = pd.to_numeric(prof_series, errors='coerce')
+                        processed['Profit'] = pd.to_numeric(prof_series, errors='coerce').fillna(0)
+                        
+                        # 💡 手数料とスワップがあればProfitに加算してNet Profit（純損益）にする
+                        if c_idx is not None:
+                            c_series = temp_df.iloc[:, c_idx].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '', regex=False)
+                            processed['Profit'] += pd.to_numeric(c_series, errors='coerce').fillna(0)
+                        if s_idx is not None:
+                            s_series = temp_df.iloc[:, s_idx].astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '', regex=False)
+                            processed['Profit'] += pd.to_numeric(s_series, errors='coerce').fillna(0)
                         
                         if t_idx is not None: processed['Open Time'] = temp_df.iloc[:, t_idx]
                         if i_idx is not None: processed['Item'] = temp_df.iloc[:, i_idx]
                         
-                        # MT5の場合、Directionが「out」または「in/out」（決済）のもののみを抽出
                         if d_idx is not None:
+                            # 💡 MT5の場合：決済(out等)のみ抽出。プラマイゼロ（ブレイクイーブン）も勝率計算のため残す
                             dirs = temp_df.iloc[:, d_idx].astype(str).str.strip().str.lower()
                             mask = dirs.isin(['out', 'in/out'])
-                            processed = processed[mask]
+                            processed = processed[mask].dropna(subset=['Profit'])
+                        else:
+                            # MT4の場合：入出金履歴などを弾くため0を除外
+                            processed = processed.dropna(subset=['Profit'])
+                            processed = processed[processed['Profit'] != 0]
                             
-                        # 無効なデータや、利益0（エントリー時の記録など）を除外
-                        processed = processed.dropna(subset=['Profit'])
-                        processed = processed[processed['Profit'] != 0]
-                        
                         if len(processed) > len(df_final):
                             df_final = processed
 
@@ -192,46 +196,44 @@ def get_ai_advice(api_key, df, stats):
     client = OpenAI(api_key=api_key)
     sharpe, pbo, p_val = stats
     
-    # --- 詳細なトレードデータの計算 ---
-    # 銘柄分布
     item_stats = df['Item'].value_counts().to_dict() if 'Item' in df.columns else "データなし"
     
-    # 勝率・PF・リスクリワード等の計算
+    # 💡 勝率・PF・リスクリワード等の厳密な再計算
     wins = df[df['Profit'] > 0]['Profit']
     losses = df[df['Profit'] < 0]['Profit']
+    # Profit == 0 の取引は wins/losses には入らないが、total_trades には含まれる（MT5の仕様に合致）
+    
     gross_profit = wins.sum()
     gross_loss = abs(losses.sum())
     
     profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
-    win_rate = len(wins) / len(df) * 100
-    avg_win = wins.mean() if len(wins) > 0 else 0
-    avg_loss = abs(losses.mean()) if len(losses) > 0 else 0
-    rr_ratio = avg_win / avg_loss if avg_loss != 0 else float('inf')
+    total_trades = len(df)
+    win_rate = (len(wins) / total_trades * 100) if total_trades > 0 else 0
     
-    # 時間軸（決済時間帯）の抽出
+    avg_win = wins.mean() if len(wins) > 0 else 0
+    avg_loss = losses.mean() if len(losses) > 0 else 0  # MT5に合わせて負の数値として算出(-3.02など)
+    rr_ratio = avg_win / abs(avg_loss) if avg_loss != 0 else float('inf')
+    
     time_stats = "データなし"
     if 'Open Time' in df.columns:
         try:
-            # 日時文字列(YYYY.MM.DD HH:MM:SS)から「時間(Hour)」を抽出して傾向を出す
             hours = pd.to_datetime(df['Open Time'], format='mixed', errors='coerce').dt.hour
             valid_hours = hours.dropna().astype(int)
             if not valid_hours.empty:
-                # 取引頻度が高い時間帯トップ3
                 top_hours = valid_hours.value_counts().head(3).to_dict()
                 time_stats = f"{top_hours} (単位: 時)"
         except Exception:
             pass
             
-    # --- AIへの指示書（プロンプト） ---
     prompt = f"""
     あなたは金融機関のシニア・クオンツアナリストです。
     以下の実際のトレードデータに基づき、戦略の優位性を厳密に診断し、具体的な改善案を『戦略改善ワークシート』として提示してください。
 
     【基本統計】
-    トレード数: {len(df)}
-    勝率: {win_rate:.1f}%
+    総トレード数: {total_trades}
+    勝率: {win_rate:.2f}%
     プロフィットファクター: {profit_factor:.2f}
-    リスクリワードレシオ (平均利益/平均損失): {rr_ratio:.2f}
+    リスクリワードレシオ: {rr_ratio:.2f}
     平均利益: {avg_win:.2f} / 平均損失: {avg_loss:.2f}
     決済時間帯(Hour)の偏り (頻度上位3つ): {time_stats}
     銘柄分布: {item_stats}
@@ -242,7 +244,7 @@ def get_ai_advice(api_key, df, stats):
     p値: {p_val:.4f}
 
     【指示】
-    上記に提示された「実際の数値（プロフィットファクター、リスクリワード、時間帯など）」を必ず根拠にして分析してください。「時間軸が不明」「リスクリワードが不明」といった推測や一般論は厳禁です。
+    上記に提示された「実際の数値」を必ず根拠にして分析してください。推測や一般論は厳禁です。
     実際の勝率やリスクリワードのバランスを評価した上で、過学習（PBO）やp値から見え隠れする将来の破綻リスクを指摘し、時間帯、銘柄選定、リスク管理の観点から論理的なロジック修正案を提示してください。
     """
     
