@@ -187,18 +187,63 @@ def analyze_strategy(df):
     p_value = np.sum(np.array(mc_results) >= sharpe) / mc_iterations
     return sharpe, pbo_score, p_value, split_sharpes, mc_results
 
-# --- 5. AI診断機能 ---
+# --- 5. AI診断機能 (詳細データ連携・プロンプト強化版) ---
 def get_ai_advice(api_key, df, stats):
     client = OpenAI(api_key=api_key)
     sharpe, pbo, p_val = stats
+    
+    # --- 詳細なトレードデータの計算 ---
+    # 銘柄分布
     item_stats = df['Item'].value_counts().to_dict() if 'Item' in df.columns else "データなし"
     
+    # 勝率・PF・リスクリワード等の計算
+    wins = df[df['Profit'] > 0]['Profit']
+    losses = df[df['Profit'] < 0]['Profit']
+    gross_profit = wins.sum()
+    gross_loss = abs(losses.sum())
+    
+    profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
+    win_rate = len(wins) / len(df) * 100
+    avg_win = wins.mean() if len(wins) > 0 else 0
+    avg_loss = abs(losses.mean()) if len(losses) > 0 else 0
+    rr_ratio = avg_win / avg_loss if avg_loss != 0 else float('inf')
+    
+    # 時間軸（決済時間帯）の抽出
+    time_stats = "データなし"
+    if 'Open Time' in df.columns:
+        try:
+            # 日時文字列(YYYY.MM.DD HH:MM:SS)から「時間(Hour)」を抽出して傾向を出す
+            hours = pd.to_datetime(df['Open Time'], format='mixed', errors='coerce').dt.hour
+            valid_hours = hours.dropna().astype(int)
+            if not valid_hours.empty:
+                # 取引頻度が高い時間帯トップ3
+                top_hours = valid_hours.value_counts().head(3).to_dict()
+                time_stats = f"{top_hours} (単位: 時)"
+        except Exception:
+            pass
+            
+    # --- AIへの指示書（プロンプト） ---
     prompt = f"""
     あなたは金融機関のシニア・クオンツアナリストです。
-    トレード数: {len(df)}, システム品質スコア: {sharpe:.2f}, PBO(過学習確率): {pbo:.1f}%, p値: {p_val:.4f}
+    以下の実際のトレードデータに基づき、戦略の優位性を厳密に診断し、具体的な改善案を『戦略改善ワークシート』として提示してください。
+
+    【基本統計】
+    トレード数: {len(df)}
+    勝率: {win_rate:.1f}%
+    プロフィットファクター: {profit_factor:.2f}
+    リスクリワードレシオ (平均利益/平均損失): {rr_ratio:.2f}
+    平均利益: {avg_win:.2f} / 平均損失: {avg_loss:.2f}
+    決済時間帯(Hour)の偏り (頻度上位3つ): {time_stats}
     銘柄分布: {item_stats}
-    上記に基づき、戦略の優位性を厳密に診断し、具体的な改善案を『戦略改善ワークシート』として提示してください。
-    特に、時間軸、銘柄の偏り、リスクリワードの観点から数学的・論理的な提言を含めること。
+
+    【統計・過学習評価】
+    システム品質スコア: {sharpe:.2f}
+    PBO(過学習確率): {pbo:.1f}%
+    p値: {p_val:.4f}
+
+    【指示】
+    上記に提示された「実際の数値（プロフィットファクター、リスクリワード、時間帯など）」を必ず根拠にして分析してください。「時間軸が不明」「リスクリワードが不明」といった推測や一般論は厳禁です。
+    実際の勝率やリスクリワードのバランスを評価した上で、過学習（PBO）やp値から見え隠れする将来の破綻リスクを指摘し、時間帯、銘柄選定、リスク管理の観点から論理的なロジック修正案を提示してください。
     """
     
     response = client.chat.completions.create(
