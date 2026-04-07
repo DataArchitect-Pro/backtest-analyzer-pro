@@ -191,17 +191,16 @@ def analyze_strategy(df):
     p_value = np.sum(np.array(mc_results) >= sharpe) / mc_iterations
     return sharpe, pbo_score, p_value, split_sharpes, mc_results
 
-# --- 5. AI診断機能 (詳細データ連携・プロンプト強化版) ---
+# --- 5. AI診断機能 (詳細データ連携・プロンプト＆レイアウト強化版) ---
 def get_ai_advice(api_key, df, stats):
     client = OpenAI(api_key=api_key)
     sharpe, pbo, p_val = stats
     
     item_stats = df['Item'].value_counts().to_dict() if 'Item' in df.columns else "データなし"
     
-    # 💡 勝率・PF・リスクリワード等の厳密な再計算
+    # 勝率・PF・リスクリワード等の厳密な計算
     wins = df[df['Profit'] > 0]['Profit']
     losses = df[df['Profit'] < 0]['Profit']
-    # Profit == 0 の取引は wins/losses には入らないが、total_trades には含まれる（MT5の仕様に合致）
     
     gross_profit = wins.sum()
     gross_loss = abs(losses.sum())
@@ -211,7 +210,7 @@ def get_ai_advice(api_key, df, stats):
     win_rate = (len(wins) / total_trades * 100) if total_trades > 0 else 0
     
     avg_win = wins.mean() if len(wins) > 0 else 0
-    avg_loss = losses.mean() if len(losses) > 0 else 0  # MT5に合わせて負の数値として算出(-3.02など)
+    avg_loss = losses.mean() if len(losses) > 0 else 0
     rr_ratio = avg_win / abs(avg_loss) if avg_loss != 0 else float('inf')
     
     time_stats = "データなし"
@@ -243,9 +242,14 @@ def get_ai_advice(api_key, df, stats):
     PBO(過学習確率): {pbo:.1f}%
     p値: {p_val:.4f}
 
-    【指示】
+    【分析の指示】
     上記に提示された「実際の数値」を必ず根拠にして分析してください。推測や一般論は厳禁です。
     実際の勝率やリスクリワードのバランスを評価した上で、過学習（PBO）やp値から見え隠れする将来の破綻リスクを指摘し、時間帯、銘柄選定、リスク管理の観点から論理的なロジック修正案を提示してください。
+
+    【出力レイアウトの厳格なルール】
+    - 必ずMarkdown形式を使用し、見出し（### や ####）を用いて構造化してください。
+    - 要点は箇条書き（- ）を積極的に活用し、長文を避けてください。
+    - 各見出し、段落、および箇条書きリストの前後は【必ず1行以上の空白行（改行）】を挿入し、視覚的に圧迫感のない、プロフェッショナルで読みやすいレポートに仕上げてください。
     """
     
     response = client.chat.completions.create(
