@@ -94,35 +94,61 @@ def check_password():
 # アプリ起動時に必ずパスワードとセッションをチェック
 check_password()
 
-# --- 3. データ前処理 (Open/Close Time, Item対応) ---
+# --- 3. データ前処理 (Open/Close Time, Item対応, MT5 Dealsテーブル特化) ---
 def preprocess_data(file, platform, custom_col=None):
     try:
         if platform == "MT4/MT5 (HTML Report)":
             tables = pd.read_html(file)
             df_final = pd.DataFrame()
+            
             for df in tables:
-                for i in range(min(20, len(df))):
-                    row_values = [str(val).strip() for val in df.iloc[i]]
-                    target_keywords = ['Profit', 'Profit/Loss', '利益']
-                    p_idx = next((idx for idx, val in enumerate(row_values) if val in target_keywords), None)
+                if len(df) < 2: continue
+                
+                header_idx = -1
+                # ヘッダー行を探す (Profit, Timeが含まれる行)
+                for i in range(min(30, len(df))):
+                    row_vals = [str(v).strip().lower() for v in df.iloc[i]]
+                    if ('profit' in row_vals or '利益' in row_vals) and ('time' in row_vals or 'open time' in row_vals or '時間' in row_vals):
+                        header_idx = i
+                        break
+                        
+                if header_idx != -1:
+                    headers = [str(v).strip() for v in df.iloc[header_idx]]
+                    
+                    # 各列のインデックスを取得
+                    p_idx = next((j for j, v in enumerate(headers) if v.lower() in ['profit', 'profit/loss', '利益']), None)
+                    t_idx = next((j for j, v in enumerate(headers) if v.lower() in ['time', 'open time', '時間']), None)
+                    i_idx = next((j for j, v in enumerate(headers) if v.lower() in ['item', 'symbol', '銘柄']), None)
+                    d_idx = next((j for j, v in enumerate(headers) if v.lower() in ['direction', 'entry', '方向']), None)
+                    
                     if p_idx is not None:
-                        temp_df = df.copy()
-                        temp_df.columns = row_values
-                        temp_df = temp_df.iloc[i+1:].reset_index(drop=True)
-                        col_indices = {
-                            'Profit': p_idx,
-                            'Open Time': next((j for j, v in enumerate(row_values) if 'Open Time' in v or 'Time' in v), None),
-                            'Close Time': next((j for j, v in enumerate(row_values) if 'Close Time' in v), None),
-                            'Item': next((j for j, v in enumerate(row_values) if 'Item' in v or 'Symbol' in v or '銘柄' in v), None)
-                        }
+                        temp_df = df.iloc[header_idx+1:].copy().reset_index(drop=True)
                         processed = pd.DataFrame()
-                        processed['Profit'] = pd.to_numeric(temp_df.iloc[:, col_indices['Profit']], errors='coerce')
-                        if col_indices['Open Time'] is not None: processed['Open Time'] = temp_df.iloc[:, col_indices['Open Time']]
-                        if col_indices['Close Time'] is not None: processed['Close Time'] = temp_df.iloc[:, col_indices['Close Time']]
-                        if col_indices['Item'] is not None: processed['Item'] = temp_df.iloc[:, col_indices['Item']]
-                        processed = processed[processed['Profit'] != 0].dropna(subset=['Profit'])
-                        if len(processed) > len(df_final): df_final = processed
+                        
+                        # MT5は数値にスペースが入るため除去 (例: "1 234.56" -> "1234.56")
+                        prof_series = temp_df.iloc[:, p_idx].astype(str).str.replace(' ', '', regex=False).str.replace(',', '', regex=False)
+                        processed['Profit'] = pd.to_numeric(prof_series, errors='coerce')
+                        
+                        if t_idx is not None: processed['Open Time'] = temp_df.iloc[:, t_idx]
+                        if i_idx is not None: processed['Item'] = temp_df.iloc[:, i_idx]
+                        
+                        # MT5のDealsテーブルの場合、Direction(方向)列が存在する
+                        if d_idx is not None:
+                            dirs = temp_df.iloc[:, d_idx].astype(str).str.lower()
+                            # 決済(out)またはドテン(in/out)のみを抽出し、エントリー(in)を除外
+                            mask = dirs.isin(['out', 'in/out'])
+                            processed = processed[mask]
+                            
+                        # 無効な行(NaN)や損益0の行を除外
+                        processed = processed.dropna(subset=['Profit'])
+                        processed = processed[processed['Profit'] != 0]
+                        
+                        # 最も取引データ（行数）が多いテーブルを最終データとする（自動的にDealsが選ばれる）
+                        if len(processed) > len(df_final):
+                            df_final = processed
+
             return df_final if not df_final.empty else None
+            
         elif platform == "カスタム (CSV)":
             df = pd.read_csv(file)
             if custom_col:
