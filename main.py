@@ -192,18 +192,25 @@ def get_ai_advice(api_key, df, stats):
     client = OpenAI(api_key=api_key)
     sharpe, pbo, p_val = stats
     item_stats = df['Item'].value_counts().to_dict() if 'Item' in df.columns else "データなし"
+    
     prompt = f"""
-    あなたは金融機関のクオンツアナリストです。
-    トレード数: {len(df)}, シャープ: {sharpe:.2f}, PBO: {pbo:.1f}%, p値: {p_val:.4f}
+    あなたは金融機関のシニア・クオンツアナリストです。
+    トレード数: {len(df)}, システム品質スコア: {sharpe:.2f}, PBO(過学習確率): {pbo:.1f}%, p値: {p_val:.4f}
     銘柄分布: {item_stats}
-    上記に基づき、戦略の優位性を診断し、具体的な改善案を『戦略改善ワークシート』として提示してください。
+    上記に基づき、戦略の優位性を厳密に診断し、具体的な改善案を『戦略改善ワークシート』として提示してください。
+    特に、時間軸、銘柄の偏り、リスクリワードの観点から数学的・論理的な提言を含めること。
     """
-    response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}])
+    
+    response = client.chat.completions.create(
+        model="o3-mini", 
+        messages=[{"role": "user", "content": prompt}]
+    )
     return response.choices[0].message.content
 
 # --- 6. レポート出力機能 (グラフ埋め込み版) ---
 def generate_html_report(df, stats, advice, fig1, fig2):
     sharpe, pbo, p_val = stats
+    # PlotlyグラフをHTML文字列に変換
     fig1_html = fig1.to_html(full_html=False, include_plotlyjs='cdn')
     fig2_html = fig2.to_html(full_html=False, include_plotlyjs='cdn')
     
@@ -215,7 +222,7 @@ def generate_html_report(df, stats, advice, fig1, fig2):
         <hr>
         <h3>■ 統計スコア</h3>
         <ul>
-            <li>期待シャープレシオ: {sharpe:.2f}</li>
+            <li>システム品質スコア: {sharpe:.2f}</li>
             <li>PBO (過学習確率): {pbo:.1f}%</li>
             <li>モンテカルロ p値: {p_val:.4f}</li>
         </ul>
